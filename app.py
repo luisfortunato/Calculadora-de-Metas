@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import gspread
@@ -8,30 +9,71 @@ st.set_page_config(
     page_title="Calculadora de Metas & Histórico", page_icon="📊", layout="centered"
 )
 
+# Lista de todas as 22 colunas salvas na planilha
+COLUNAS_PLANILHA = [
+    "Mês/Ano",
+    "Salário Base (R$)",
+    "Ajuda de Custo (R$)",
+    "Meta Fat. (R$)",
+    "Fat. Realizado (R$)",
+    "Ating. Fat. (%)",
+    "Positivação (%)",
+    "Coquetel (%)",
+    "Fritos Lanche (%)",
+    "Croissant/Folhados (%)",
+    "Fermentados (%)",
+    "Pão de Queijo (%)",
+    "Donnuts (%)",
+    "Tortas/Quiches (%)",
+    "Mix Ponderado (%)",
+    "Comissão Total (R$)",
+    "Ganho Bruto (R$)",
+    "Parcela Carro (R$)",
+    "Combustível (R$)",
+    "Alimentação (R$)",
+    "Custos Totais (R$)",
+    "🚀 Saldo Líquido Efetivo (R$)",
+]
 
-# --- CONEXÃO COM O GOOGLE SHEETS VIA GSPREAD ---
+
+# --- CONEXÃO INTELIGENTE COM O GOOGLE SHEETS ---
 @st.cache_resource
 def conectar_google_sheets():
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    # Lê as credenciais seguras dos Secrets do Streamlit
-    credentials = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"], scopes=scope
-    )
+
+    caminho_chave_local = "chave.json"
+
+    # 1. Tenta arquivo local (chave.json)
+    if os.path.exists(caminho_chave_local):
+        credentials = Credentials.from_service_account_file(
+            caminho_chave_local, scopes=scope
+        )
+    # 2. Tenta Streamlit Secrets na Nuvem
+    elif "gcp_service_account" in st.secrets:
+        credentials = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=scope
+        )
+    else:
+        raise FileNotFoundError(
+            "Nenhuma credencial encontrada ('chave.json' ou 'st.secrets')."
+        )
+
     client = gspread.authorize(credentials)
-    # Abre a planilha pelo nome exato no Google Drive
     sheet = client.open("Historico_Comissoes").sheet1
     return sheet
 
 
+# Tenta inicializar a conexão
+sheet = None
 try:
     sheet = conectar_google_sheets()
 except Exception as e:
-    st.error(f"⚠️ Detalhe do Erro: {e}")
+    st.error(f"⚠️ Erro ao conectar com o Google Sheets: {e}")
 
-st.title("📊 Calculadora de Comissão & Histórico Mensal")
+st.title("📊 Calculadora de Comissão & Histórico Completo")
 st.caption("Dados salvos de forma 100% privada e segura no seu Google Drive.")
 
 st.divider()
@@ -89,7 +131,7 @@ atingimento_fat = real_fat / meta_fat if meta_fat > 0 else 0.0
 
 st.divider()
 
-# --- SEÇÃO 3: MIX DE PRODUTOS ---
+# --- SEÇÃO 3: AVALIAÇÃO DE CATEGORIAS (MIX DE PRODUTOS) ---
 st.subheader("3. Atingimento do Mix de Produtos")
 
 categorias = [
@@ -103,24 +145,22 @@ categorias = [
     {"nome": "Tortas / Quiches", "peso": 0.00, "key": "tor"},
 ]
 
-atingimentos = {}
-st.write("Insira o % de atingimento realizado em cada categoria:")
-
+atingimentos_dict = {}
 cols = st.columns(2)
 for idx, cat in enumerate(categorias):
     col = cols[idx % 2]
     val_default = 90.6 if cat["key"] == "pos" else 100.0
-    atingimentos[cat["key"]] = (
-        col.number_input(
-            f"{cat['nome']} (Peso: {int(cat['peso'] * 100)}%)",
-            value=val_default,
-            step=1.0,
-            format="%.1f",
-        )
-        / 100.0
+    val_input = col.number_input(
+        f"{cat['nome']} (Peso: {int(cat['peso'] * 100)}%)",
+        value=val_default,
+        step=1.0,
+        format="%.1f",
     )
+    atingimentos_dict[cat["key"]] = val_input
 
-mix_ponderado = sum(atingimentos[cat["key"]] * cat["peso"] for cat in categorias)
+mix_ponderado = sum(
+    (atingimentos_dict[cat["key"]] / 100.0) * cat["peso"] for cat in categorias
+)
 
 st.divider()
 
@@ -134,7 +174,7 @@ gastos_alimentacao = col_c3.number_input("Alimentação (R$)", value=400.0, step
 custos_totais_trabalho = parcela_carro + gastos_combustivel + gastos_alimentacao
 
 
-# --- REGRAS DE NEGÓCIO ---
+# --- REGRAS DE NEGÓCIO DA COMISSÃO ---
 def get_pct_fat(ating):
     if ating < 0.85:
         return 0.0
@@ -191,71 +231,118 @@ st.info(f"💵 **Ganho Bruto Total:** R$ {ganho_bruto_total:,.2f}")
 st.warning(f"💸 **Total de Despesas:** R$ {custos_totais_trabalho:,.2f}")
 st.success(f"### 🚀 Saldo Líquido Efetivo: R$ {saldo_liquido_real:,.2f}")
 
-# --- BOTÃO PARA SALVAR DIRETO NO GOOGLE SHEETS ---
+# --- BOTÃO PARA SALVAR TUDO NO GOOGLE SHEETS ---
 st.write("---")
-if st.button(f"💾 Salvar / Atualizar Fechamento de {ref_mes_ano} no Drive"):
-    try:
-        dados_existentes = sheet.get_all_records()
-
-        # Procura se o mês já existe na planilha para atualizar a linha
-        linha_para_atualizar = None
-        for idx, row in enumerate(dados_existentes, start=2):  # Linha 1 é o cabeçalho
-            if row.get("Mês/Ano") == ref_mes_ano:
-                linha_para_atualizar = idx
-                break
-
-        nova_linha = [
-            ref_mes_ano,
-            round(real_fat, 2),
-            f"{mix_ponderado * 100:.2f}%",
-            round(comissao_reais, 2),
-            round(ganho_bruto_total, 2),
-            round(custos_totais_trabalho, 2),
-            round(saldo_liquido_real, 2),
-        ]
-
-        if linha_para_atualizar:
-            sheet.update(
-                f"A{linha_para_atualizar}:G{linha_para_atualizar}", [nova_linha]
-            )
-            st.success(
-                f"Fechamento de {ref_mes_ano} atualizado na planilha com sucesso!"
-            )
-        else:
-            sheet.append_row(nova_linha)
-            st.success(f"Fechamento de {ref_mes_ano} registrado no Google Sheets!")
-
-    except Exception as e:
-        st.error(f"Erro ao salvar na planilha: {e}")
-
-# --- SEÇÃO 5: TABELA DO GOOGLE SHEETS & GERENCIAMENTO ---
-st.divider()
-st.subheader("📋 Histórico de Fechamentos (Google Sheets)")
-
-try:
-    dados_planilha = sheet.get_all_records()
-    if len(dados_planilha) > 0:
-        df_sheets = pd.DataFrame(dados_planilha)
-        st.dataframe(df_sheets, use_container_width=True)
-
-        st.write("---")
-        st.caption("🛠️ **Gerenciar Linhas da Planilha:**")
-
-        col_del_sel, col_del_btn = st.columns([2, 1])
-        meses_salvos = [row["Mês/Ano"] for row in dados_planilha]
-        mes_para_remover = col_del_sel.selectbox(
-            "Escolha um mês para remover da planilha:", meses_salvos
-        )
-
-        if col_del_btn.button("❌ Remover do Drive"):
-            for idx, row in enumerate(dados_planilha, start=2):
-                if row["Mês/Ano"] == mes_para_remover:
-                    sheet.delete_rows(idx)
-                    st.success(f"{mes_para_remover} removido com sucesso!")
-                    st.rerun()
+if st.button(f"💾 Salvar Fechamento COMPLETO de {ref_mes_ano} no Drive"):
+    if sheet is None:
+        st.error("Não há conexão ativa com o Google Sheets.")
     else:
-        st.write("Nenhum registro encontrado na planilha do Google Drive ainda.")
-except Exception as e:
-    st.warning(
-        "Não foi possível carregar a tabela. Verifique a conexão com o Google Sheets."
-    )
+        try:
+            # 1. Atualiza/Garante o cabeçalho correto da planilha (Linha 1)
+            sheet.update("A1:V1", [COLUNAS_PLANILHA])
+
+            dados_existentes = sheet.get_all_records()
+
+            # 2. Procura se o mês selecionado já foi salvo antes para atualizar a linha
+            linha_para_atualizar = None
+            for idx, row in enumerate(dados_existentes, start=2):
+                if str(row.get("Mês/Ano")) == ref_mes_ano:
+                    linha_para_atualizar = idx
+                    break
+
+            # 3. Prepara TODOS os dados imputados e calculados
+            nova_linha = [
+                ref_mes_ano,
+                round(meta_fat, 2),
+                round(real_fat, 2),
+                f"{atingimento_fat * 100:.1f}%",
+                f"{atingimentos_dict['pos']:.1f}%",
+                f"{atingimentos_dict['coq']:.1f}%",
+                f"{atingimentos_dict['fri']:.1f}%",
+                f"{atingimentos_dict['cro']:.1f}%",
+                f"{atingimentos_dict['fer']:.1f}%",
+                f"{atingimentos_dict['pao']:.1f}%",
+                f"{atingimentos_dict['don']:.1f}%",
+                f"{atingimentos_dict['tor']:.1f}%",
+                f"{mix_ponderado * 100:.2f}%",
+                round(comissao_reais, 2),
+                round(ganho_bruto_total, 2),
+                round(custos_totais_trabalho, 2),
+                round(saldo_liquido_real, 2),
+            ]
+
+            if linha_para_atualizar:
+                sheet.update(
+                    f"A{linha_para_atualizar}:V{linha_para_atualizar}", [nova_linha]
+                )
+                st.success(
+                    f"Fechamento de {ref_mes_ano} atualizado com sucesso no Google Sheets!"
+                )
+            else:
+                sheet.append_row(nova_linha)
+                st.success(
+                    f"Fechamento de {ref_mes_ano} salvo com sucesso no Google Sheets!"
+                )
+
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"Erro ao salvar na planilha: {e}")
+
+# --- SEÇÃO 5: TABELA DO GOOGLE SHEETS ---
+st.divider()
+st.subheader("📋 Histórico Completo de Fechamentos (Google Sheets)")
+
+if sheet is not None:
+    try:
+        dados_planilha = sheet.get_all_records()
+        if len(dados_planilha) > 0:
+            df_sheets = pd.DataFrame(dados_planilha)
+
+            # Colunas originais exibidas na tabela
+            colunas_resumo = [
+                "Mês/Ano",
+                "Fat. Realizado (R$)",
+                "Ating. Fat. (%)",
+                "Mix Ponderado (%)",
+                "Comissão Total (R$)",
+                "Custos Totais (R$)",
+                "🚀 Saldo Líquido Efetivo (R$)",
+            ]
+
+            # Filtra garantindo que só exiba se a coluna existir no DataFrame
+            colunas_presentes = [
+                col for col in colunas_resumo if col in df_sheets.columns
+            ]
+            df_exibicao = df_sheets[colunas_presentes]
+
+            # Exibe a tabela simplificada
+            st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
+
+            st.write("---")
+            st.caption("🛠️ **Gerenciar Registros:**")
+
+            col_del_sel, col_del_btn = st.columns([2, 1])
+            meses_salvos = [
+                str(row["Mês/Ano"]) for row in dados_planilha if "Mês/Ano" in row
+            ]
+
+            if meses_salvos:
+                mes_para_remover = col_del_sel.selectbox(
+                    "Escolha um mês para remover:", meses_salvos
+                )
+
+                if col_del_btn.button("❌ Remover do Drive"):
+                    for idx, row in enumerate(dados_planilha, start=2):
+                        if str(row.get("Mês/Ano")) == mes_para_remover:
+                            sheet.delete_rows(idx)
+                            st.success(
+                                f"Registro de {mes_para_remover} removido com sucesso!"
+                            )
+                            st.rerun()
+        else:
+            st.info("Nenhum registro encontrado na planilha do Google Drive ainda.")
+    except Exception as e:
+        st.warning(f"Não foi possível carregar a tabela. Detalhe técnico do erro: {e}")
+else:
+    st.warning("Verifique a conexão com o Google Sheets no topo da página.")
